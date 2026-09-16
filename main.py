@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ============================================================
-自治体議会調査 PDF整理・結合システム（統合版 v14・TXT/Word対応＋タイトル取得3ページ対応版）
+自治体議会調査 PDF整理・結合システム（統合版 v15・TXT/Word対応＋査読修正版）
 ============================================================
 
 ★★★ このプログラムは何をするもの？ ★★★
@@ -15,7 +15,7 @@
 
   という作業を自動化するプログラムです。
 
-  v14ではさらに、v12の「PDF→TXT→Word」を維持したまま、タイトル誤認と「.pdf.pdf」問題を防ぐ検証を強化します。
+  v15ではv14の構造を維持したまま、査読で発見された「同名衝突時の二重拡張子再発」と「TXT→Word資料欠落の未検知」を修正します。
 
   原本のPDFは絶対に書き換えません。すべて「コピー」に対して作業します。
 
@@ -120,7 +120,9 @@
   13. ヤジは「人や自治体を攻撃する」のではなく、数字や行政用語の重さを
       中学生っぽくツッコむ程度に限定する。
 
-★★★ v14で追加・修正した点 ★★★
+★★★ v15で追加・修正した点 ★★★
+  1. 同名ファイル衝突時も clean_title を使い、「.pdf.pdf」の再発を防止。
+  2. TXT→Wordで資料数・資料番号・順序・タイトルを対応表（group_records）と照合し、欠落を黙って成功扱いしない。
 
   1. AIが「目次」だけをタイトルとして返した場合は、正式タイトルとして採用せず要確認にする。
   2. AIが元ファイル名そのものや拡張子付きファイル名を返した場合も、タイトル品質の要確認対象にする。
@@ -754,7 +756,7 @@ def build_unique_filename(title: str, ext: str, used_names: set) -> str:
     candidate = f"{clean_title}{ext}"
     counter = 2
     while candidate in used_names:
-        candidate = f"{title}_{counter}{ext}"
+        candidate = f"{clean_title}_{counter}{ext}"
         counter += 1
     used_names.add(candidate)
     return candidate
@@ -1344,10 +1346,14 @@ def extract_merged_pdf_to_txt(output_path: str, group_records: list, txt_dir: st
         doc.close()
 
 
-def txt_to_word(txt_path: str, word_dir: str):
+def txt_to_word(txt_path: str, word_dir: str, expected_records: Optional[list] = None):
     """
     ④で生成したTXTだけを読み、⑤としてWordを生成する。
     PDFをここでは直接読まない。TXT→Wordの工程を明確に分離する。
+
+    expected_records が渡された場合は、TXTから抽出した資料台帳と
+    「資料数・資料番号・順序・タイトル」を照合し、資料の静かな欠落や
+    並べ替えを検知してからWordを生成する。
     """
     os.makedirs(word_dir, exist_ok=True)
     word_name = os.path.splitext(os.path.basename(txt_path))[0] + ".docx"
@@ -1369,6 +1375,27 @@ def txt_to_word(txt_path: str, word_dir: str):
             if title_line.startswith("資料タイトル:"):
                 title = title_line.split(":", 1)[1].strip()
                 toc_items.append((line.strip("【】"), title))
+
+    # 期待される資料台帳がある場合は、数だけでなく番号・順序・タイトルまで照合する。
+    if expected_records is not None:
+        expected_items = [
+            (f"資料 {idx:03d}", str(rec.final_title).strip())
+            for idx, rec in enumerate(expected_records, 1)
+        ]
+        actual_items = [(label.strip(), title.strip()) for label, title in toc_items]
+        if len(actual_items) != len(expected_items):
+            raise RuntimeError(
+                f"TXTの資料数が不一致（期待{len(expected_items)} / 実際{len(actual_items)}）"
+            )
+        if actual_items != expected_items:
+            mismatches = []
+            for idx, (expected, actual) in enumerate(zip(expected_items, actual_items), 1):
+                if expected != actual:
+                    mismatches.append(f"{idx}件目: 期待={expected} / 実際={actual}")
+            detail = "; ".join(mismatches[:10])
+            if len(mismatches) > 10:
+                detail += " …"
+            raise RuntimeError(f"TXTの資料番号・順序・タイトルが対応表と不一致: {detail}")
 
     title = next((line for line in lines if line.startswith("自治体議会資料 テキスト化データ")), "自治体議会資料")
     p = document.add_paragraph()
@@ -1437,7 +1464,7 @@ def generate_txt_and_word_for_volumes(volume_results: list, config: Config):
                 if not txt_path:
                     raise RuntimeError("Word生成にはTXTが必要ですが、TXTが生成されていません")
                 print(f"   🗂️ 第{volume_index}巻: TXT→Wordを開始。")
-                word_path = txt_to_word(txt_path, config.word_dir)
+                word_path = txt_to_word(txt_path, config.word_dir, expected_records=group_records)
                 word_status = "ok"
                 print(f"   📘 Word: {word_path}")
         except Exception as e:
