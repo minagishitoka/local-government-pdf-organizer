@@ -765,12 +765,15 @@ def _offline_title_candidate(text: str, filename: str) -> str:
                 continue
             if line not in candidates:
                 candidates.append(line)
-    # 「第○回定例会」等は強いタイトル候補。ただし候補が複数ある場合はAIに任せる。
-    strong = [x for x in candidates if re.search(r"(第[0-9０-９]+回|定例会|臨時会).*(議会|会議|委員会)?", x)]
+    # 「第○回定例会」「会議録」「議事日程」等だけを強い候補として扱う。
+    # 「○○町議会」のような組織名だけでは資料タイトルとして弱いのでAIへ回す。
+    strong = [
+        x for x in candidates
+        if re.search(r"(第[0-9０-９]+回|定例会|臨時会|会議録|議事日程|委員会)", x)
+        and not re.fullmatch(r".*議会", x)
+    ]
     if len(strong) == 1:
         return strong[0]
-    if len(candidates) == 1:
-        return candidates[0]
     return ""
 
 def _offline_extract_metadata(path: str, config: Config) -> tuple:
