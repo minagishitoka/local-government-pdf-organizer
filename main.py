@@ -643,7 +643,7 @@ def validate_document_date(raw_date: str) -> tuple:
     if not raw_date or raw_date.strip().casefold() in DATE_FALLBACK_MARKERS:
         return "", "needs_review", "開催日を確認できなかった"
     value = unicodedata.normalize("NFKC", raw_date.strip())
-    if not re.fullmatch(r"d{4}-d{2}-d{2}", value):
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
         return "", "needs_review", f"日付形式が不正: {value}"
     return value, "ok", ""
 
@@ -754,13 +754,12 @@ def process_single_pdf(path: str, client: "genai.Client", config: Config) -> Pdf
     )
 
     with print_lock:
-        mark = "✅" if status == "ok" else "⚠️"
-        if status == "ok":
-            print(f"  ✅ [{rec.original_filename}] → {final_title}")
-            if rec.ai_teasing:
-                print(f"      👦「{rec.ai_teasing}」")
-        else:
-            print(f"  ⚠️ [{rec.original_filename}] → {final_title} （このタイトル、なんか怪しい気がする……。変なファイル名で残ると困るだろ。要確認に回しておくからな: {reason}）")
+        mark = "✅" if rec.validation_status == "ok" else "⚠️"
+        print(f"  {mark} [{rec.original_filename}] → {rec.municipality or '自治体不明'}_{rec.document_date or '日付不明'}_{final_title}")
+        if rec.ai_teasing:
+            print(f"      👦「{rec.ai_teasing}」")
+        if rec.validation_status != "ok":
+            print(f"      ⚠️ 要確認: {rec.validation_reason}")
 
     return rec
 
@@ -802,7 +801,7 @@ SAFE_PATH_LIMIT = 240
 def sanitize_filename_part(value: str, fallback: str) -> str:
     value = unicodedata.normalize("NFKC", (value or "").strip())
     value = FORBIDDEN_CHARS_PATTERN.sub(" ", value)
-    value = re.sub(r"s+", " ", value).strip(" .")
+    value = re.sub(r"\s+", " ", value).strip(" .")
     return value or fallback
 
 def build_unique_filename(title: str, ext: str, used_names: set) -> str:
