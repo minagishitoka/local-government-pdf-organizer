@@ -706,7 +706,9 @@ def _offline_municipality(text: str) -> str:
                 value = m.group(1).strip()
                 if value in {"市町村", "市区町村", "町村"}:
                     continue
-                if value not in candidates:
+                # 「青森県中泊町」のように都道府県まで一緒に取れた場合は自治体部分だけ残す。
+                value = re.sub(r"^.*?[都道府県]", "", value)
+                if value and value not in candidates:
                     candidates.append(value)
     return candidates[0] if len(candidates) == 1 else ""
 
@@ -785,12 +787,18 @@ def _free_should_call_ai(municipality: str, document_date: str, title: str) -> b
 def _free_call_ai_or_raise(client, title_pages_bytes: bytes, config: Config):
     if not _free_reserve_api_call(config):
         raise RuntimeError("無料耐久版のローカルAPI上限に到達。今回はAIを呼ばず要確認に回します。")
+    # 無料耐久版では1つの資料につきAPI試行は原則1回。
+    # 429等で何度も同じ資料を投げ続けることを防ぐ。
+    original_retries = config.ai_max_retries
+    config.ai_max_retries = 1
     try:
         return call_ai_title_and_teasing(client, title_pages_bytes, config)
     except Exception as e:
         if "429" in str(e).upper() or "RESOURCE_EXHAUSTED" in str(e).upper():
             time.sleep(config.free_retry_wait_seconds_on_429)
         raise
+    finally:
+        config.ai_max_retries = original_retries
 
 # =====================================================
 # 4. AI出力の検証（Python担当）
