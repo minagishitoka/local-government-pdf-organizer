@@ -661,7 +661,7 @@ def _free_reserve_api_call(config: Config) -> bool:
 
 def _normalize_era_date(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
-    m = re.search(r"(令和|平成|昭和)\\s*(元|[0-9]+)年\\s*([0-9]+)月\\s*([0-9]+)日", text)
+    m = re.search(r"(令和|平成|昭和)\s*(元|[0-9]+)年\s*([0-9]+)月\s*([0-9]+)日", text)
     if not m:
         return ""
     era, year_s, month_s, day_s = m.groups()
@@ -671,7 +671,7 @@ def _normalize_era_date(text: str) -> str:
 
 def _normalize_gregorian_date(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
-    m = re.search(r"(20[0-9]{2})[年\\-/]\\s*([0-9]{1,2})[月\\-/]\\s*([0-9]{1,2})日?", text)
+    m = re.search(r"(20[0-9]{2})[年\-/]\s*([0-9]{1,2})[月\-/]\s*([0-9]{1,2})日?", text)
     if not m:
         return ""
     y, mo, d = map(int, m.groups())
@@ -697,7 +697,7 @@ def _offline_municipality(text: str) -> str:
     lines = [unicodedata.normalize("NFKC", x).strip() for x in text.splitlines() if x.strip()]
     patterns = [
         re.compile(r"([一-龥々ぁ-んァ-ヶA-Za-z0-9・ー]{1,30}(?:市|区|町|村))(?:議会|議会事務局|役所|役場|教育委員会)"),
-        re.compile(r"([一-龥々ぁ-んァ-ヶA-Za-z0-9・ー]{1,30}(?:市|区|町|村))\\s*(?:議会|役所|役場|教育委員会)")
+        re.compile(r"([一-龥々ぁ-んァ-ヶA-Za-z0-9・ー]{1,30}(?:市|区|町|村))\s*(?:議会|役所|役場|教育委員会)")
     ]
     candidates = []
     for line in lines:
@@ -718,8 +718,8 @@ def _offline_date(text: str) -> str:
     bad_words = ("発行", "作成", "更新", "印刷", "改訂", "編集")
     good_words = ("開催", "開会", "会期", "日時", "日程", "招集", "定例会", "臨時会", "会議日", "年月日")
     date_patterns = [
-        re.compile(r"(令和|平成|昭和)\\s*(?:元|[0-9]+)年\\s*[0-9]+月\\s*[0-9]+日"),
-        re.compile(r"20[0-9]{2}[年\\-/]\\s*[0-9]{1,2}[月\\-/]\\s*[0-9]{1,2}日?")
+        re.compile(r"(令和|平成|昭和)\s*(?:元|[0-9]+)年\s*[0-9]+月\s*[0-9]+日"),
+        re.compile(r"20[0-9]{2}[年\-/]\s*[0-9]{1,2}[月\-/]\s*[0-9]{1,2}日?")
     ]
     for idx, line in enumerate(lines):
         dates = []
@@ -754,7 +754,7 @@ def _offline_date(text: str) -> str:
     return top[0] if len(set(top)) == 1 and top_score >= 1 else ""
 
 def _offline_title_candidate(text: str, filename: str) -> str:
-    lines = [re.sub(r"\\s+", " ", unicodedata.normalize("NFKC", x).strip()) for x in text.splitlines()]
+    lines = [re.sub(r"\s+", " ", unicodedata.normalize("NFKC", x).strip()) for x in text.splitlines()]
     candidates = []
     keywords = ("議会", "定例会", "臨時会", "委員会", "会議録", "議事日程", "予算", "決算")
     for line in lines:
