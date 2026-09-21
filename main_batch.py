@@ -232,12 +232,12 @@ class Config:
 
     # フォルダ（すべて「このpyファイルと同じ場所」を基準にした場所になります）
     input_dir: str = field(default_factory=lambda: SCRIPT_DIR)
-    renamed_dir: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "整理済み_無料耐久"))
-    merged_dir: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "結合PDF_無料耐久"))
-    report_dir: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "レポート_無料耐久"))
-    state_path: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "state_free.json"))
-    txt_dir: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "TXT_無料耐久"))
-    word_dir: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "Word_無料耐久"))
+    renamed_dir: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "整理済み_Batch"))
+    merged_dir: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "結合PDF_Batch"))
+    report_dir: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "レポート_Batch"))
+    state_path: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "state_batch.json"))
+    txt_dir: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "TXT_Batch"))
+    word_dir: str = field(default_factory=lambda: os.path.join(SCRIPT_DIR, "Word_Batch"))
 
     # 処理パラメータ
     page_limit_per_volume: int = 1000      # 1巻あたりの上限ページ数
@@ -254,7 +254,7 @@ class Config:
     ai_backoff_base_seconds: float = 2.0   # 1回目の待機時間の目安（秒）
     ai_backoff_max_seconds: float = 30.0   # 待機時間の上限（これ以上は伸ばさない）
 
-    volume_prefix: str = "議会資料_無料耐久" # 結合PDFの名前の接頭辞
+    volume_prefix: str = "議会資料_Batch" # 結合PDFの名前の接頭辞
 
     # 事前検査を「ページ数を数えるだけ」でなく、全ページの中身が読めるかまで
     # 確認するかどうか。件数が非常に多い場合は少し時間がかかるが、
@@ -274,6 +274,9 @@ class Config:
     # Pythonで自治体名・開催日・タイトル候補が明確に取れたPDFはGeminiへ送らない。
     # 不明・曖昧なPDFだけGeminiへ送る。
     free_mode: bool = True
+
+    # Batch API版ではAPI回数の無料枠カウンタは使わない。Python一次判定だけ共有する。
+    batch_poll_seconds: int = 30
     free_min_seconds_between_api_calls: float = 4.0
     free_max_ai_calls_per_run: int = 60
     free_daily_ai_call_limit: int = 100
@@ -1027,7 +1030,7 @@ def _batch_download_results(client, job, state):
     client.files.download(file=result_file, path=local_result)
     return local_result
 
-def _batch_apply_results(records, result_path):
+def _batch_apply_results(records, result_path, config):
     by_key = {record_key(r.original_path): r for r in records}
     applied = 0
     failed = 0
@@ -2330,7 +2333,7 @@ def main():
         current = getattr(job, "state", None)
         if current == "JOB_STATE_SUCCEEDED":
             result_path = _batch_download_results(client, job, batch_state)
-            applied, failed = _batch_apply_results(batch_records, result_path)
+            applied, failed = _batch_apply_results(batch_records, result_path, config)
             batch_state.update({
                 "status": current,
                 "result_file": result_path,
