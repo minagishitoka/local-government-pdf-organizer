@@ -865,7 +865,16 @@ def _batch_extract_text(response_obj):
         pass
     return ""
 
-def _batch_make_request(pdf_key, file_name, config):
+def _batch_make_request(pdf_key, pdf_bytes, config):
+    """
+    Batch用の1リクエストを作る。
+    PDFはFiles APIへ1件ずつアップロードせず、inline_dataとしてJSONLへ埋め込む。
+
+    これにより、100件以上のPDFを処理するときに
+    「PDFごとにFiles API upload → 次のPDFへ」という大量の
+    ネットワーク往復を避けられる。
+    """
+    encoded = base64.b64encode(pdf_bytes).decode("ascii")
     return {
         "key": pdf_key,
         "request": {
@@ -873,9 +882,9 @@ def _batch_make_request(pdf_key, file_name, config):
                 "role": "user",
                 "parts": [
                     {
-                        "file_data": {
+                        "inline_data": {
                             "mime_type": "application/pdf",
-                            "file_uri": file_name,
+                            "data": encoded,
                         }
                     },
                     {"text": AI_PROMPT},
@@ -887,10 +896,50 @@ def _batch_make_request(pdf_key, file_name, config):
         },
     }
 
+
+def _batch_upload_with_retry(client, path, config, display_name, mime_type):
+    """
+    Batch入力JSONLのアップロードを一時的な接続切断に強くする。
+    """
+    attempts = 5
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return client.files.upload(
+                file=path,
+                config=types.UploadFileConfig(
+                    display_name=display_name,
+                    mime_type=mime_type,
+                ),
+            )
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+
+            wait = min(30, 2 ** (attempt - 1))
+            print(
+                f"   Batch入力ファイルのアップロード失敗。"
+                f"{wait}秒後に再試行します "
+                f"({attempt}/{attempts - 1})"
+            )
+            print(f"   原因: {type(exc).__name__}: {exc}")
+            time.sleep(wait)
+
+    raise RuntimeError(
+        f"Batch入力ファイルのアップロードに失敗しました: {last_error}"
+    )
+
+
 def _batch_prepare_input(records, client, config):
     """
-    AIが必要なPDFの冒頭3ページだけを一時PDF化し、Files APIへアップロードする。
-    そのfile_uriをJSONLから参照する。
+    AIが必要なPDFの冒頭3ページだけを一時PDF化し、
+    そのPDFをBase64のinline_dataとしてBatch JSONLへ埋め込む。
+
+    旧版では曖昧なPDFごとにFiles APIへ個別アップロードしていたが、
+    110件規模では接続断が発生しやすいため、Batch入力JSONLへの
+    inline_data方式に変更する。
     """
     _batch_ensure_dirs()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -902,11 +951,14 @@ def _batch_prepare_input(records, client, config):
         for rec in records:
             if rec.inspect_status != "ok":
                 continue
-            # Pythonで全項目が明確な資料はBatchに送らない。
+
             municipality, document_date, offline_title, _ = _offline_extract_metadata(
                 rec.original_path, config
             )
-            if not _free_should_call_ai(municipality, document_date, offline_title):
+
+            if not _free_should_call_ai(
+                municipality, document_date, offline_title
+            ):
                 rec.ai_municipality_raw = municipality
                 rec.municipality = municipality
                 rec.ai_date_raw = document_date
@@ -915,44 +967,52 @@ def _batch_prepare_input(records, client, config):
                 rec.final_title = offline_title
                 rec.ai_status = "skipped_python_clear"
                 rec.validation_status = "ok"
-                rec.validation_reason = "Python一次判定で自治体名・開催日・タイトルが明確だったためGeminiを未使用"
+                rec.validation_reason = (
+                    "Python一次判定で自治体名・開催日・タイトルが明確だったため"
+                    "Geminiを未使用"
+                )
                 continue
 
             preview_path = os.path.join(
                 BATCH_PDF_DIR,
                 f"{timestamp}_{requests:06d}.pdf"
             )
-            with open(preview_path, "wb") as f:
-                f.write(extract_title_pages_bytes(rec.original_path, max_pages=3))
 
-            uploaded = client.files.upload(
-                file=preview_path,
-                config=types.UploadFileConfig(
-                    display_name=f"batch_preview_{timestamp}_{requests:06d}",
-                    mime_type="application/pdf",
-                ),
+            pdf_bytes = extract_title_pages_bytes(
+                rec.original_path,
+                max_pages=3,
             )
-            upload_manifest[rec.original_filename] = {
-                "local_path": preview_path,
-                "file_name": uploaded.name,
-                "key": record_key(rec.original_path),
-            }
+
+            with open(preview_path, "wb") as f:
+                f.write(pdf_bytes)
 
             key = record_key(rec.original_path)
-            req = _batch_make_request(key, uploaded.name, config)
-            out.write(json.dumps(req, ensure_ascii=False) + "\n")
+
+            upload_manifest[rec.original_filename] = {
+                "local_path": preview_path,
+                "file_name": "",
+                "key": key,
+                "input_mode": "inline_data",
+            }
+
+            req = _batch_make_request(key, pdf_bytes, config)
+            out.write(
+                json.dumps(req, ensure_ascii=False, separators=(",", ":"))
+                + "\n"
+            )
             requests += 1
 
     if requests == 0:
         return None, 0, upload_manifest
 
-    uploaded_jsonl = client.files.upload(
-        file=jsonl_path,
-        config=types.UploadFileConfig(
-            display_name=f"batch_input_{timestamp}",
-            mime_type="jsonl",
-        ),
+    uploaded_jsonl = _batch_upload_with_retry(
+        client,
+        jsonl_path,
+        config,
+        display_name=f"batch_input_{timestamp}",
+        mime_type="jsonl",
     )
+
     return uploaded_jsonl.name, requests, upload_manifest
 
 def _batch_save_state(state):
@@ -1094,7 +1154,7 @@ def _batch_apply_results(records, result_path, config):
     return applied, failed
 
 def _batch_wait_and_apply(client, job, records, state, config):
-    poll = 30
+    poll = max(1, config.batch_poll_seconds)
     while True:
         job = client.batches.get(name=job.name)
         current = getattr(job, "state", None)
@@ -2117,6 +2177,7 @@ def generate_txt_and_word_for_volumes(volume_results: list, config: Config):
 def write_reports(records: list, report_dir: str):
     os.makedirs(report_dir, exist_ok=True)
     import csv
+import base64
 
     all_path = os.path.join(report_dir, "対応表_全体.csv")
     inventory_path = os.path.join(report_dir, "資料一覧_全体.csv")
