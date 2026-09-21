@@ -997,7 +997,7 @@ def _batch_prepare_input(records, client, config):
 
             req = _batch_make_request(key, pdf_bytes, config)
             out.write(
-                json.dumps(req, ensure_ascii=False, separators=(",", ":"))                + "\n"
+                json.dumps(req, ensure_ascii=False, separators=(",", ":")) + "\n"
             )
             requests += 1
 
@@ -1168,7 +1168,7 @@ def _batch_wait_and_apply(client, job, records, state, config):
         raise RuntimeError(f"Gemini Batch APIが正常終了しませんでした: {current}")
 
     result_path = _batch_download_results(client, job, state)
-    applied, failed = _batch_apply_results(records, result_path)
+    applied, failed = _batch_apply_results(records, result_path, config)
     state["result_file"] = result_path
     state["applied"] = applied
     state["failed"] = failed
