@@ -997,8 +997,7 @@ def _batch_prepare_input(records, client, config):
 
             req = _batch_make_request(key, pdf_bytes, config)
             out.write(
-                json.dumps(req, ensure_ascii=False, separators=(",", ":")) + "\n"
-            )
+                json.dumps(req, ensure_ascii=False, separators=(",", ":")) + "\n"            )
             requests += 1
 
     if requests == 0:
@@ -1086,7 +1085,23 @@ def _batch_download_results(client, job, state):
         BATCH_RESULT_DIR,
         f"batch_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
     )
-    client.files.download(file=result_file, path=local_result)
+
+    # google-genai SDKのバージョンによって files.download() のシグネチャが違う。
+    # 新しめのバージョンは path= を受け付けず、中身をbytesで返すだけなので、
+    # 両方のパターンに対応する。
+    try:
+        content = client.files.download(file=result_file, path=local_result)
+        if content and not os.path.exists(local_result):
+            with open(local_result, "wb") as f:
+                f.write(content)
+    except TypeError:
+        content = client.files.download(file=result_file)
+        with open(local_result, "wb") as f:
+            f.write(content)
+
+    if not os.path.exists(local_result):
+        raise RuntimeError("Batch結果ファイルのダウンロードに失敗しました（ローカルに保存できませんでした）")
+
     return local_result
 
 def _batch_apply_results(records, result_path, config):
@@ -1981,8 +1996,7 @@ def extract_merged_pdf_to_txt(output_path: str, group_records: list, txt_dir: st
                 f.write("=" * 80 + "\n")
                 f.write(f"【資料 {rec_no:03d}】\n")
                 f.write(f"自治体名: {rec.municipality or '自治体不明'}\n")
-                f.write(f"開催日: {rec.document_date or '日付不明'}\n")
-                f.write(f"資料タイトル: {rec.final_title}\n")
+                f.write(f"開催日: {rec.document_date or '日付不明'}\n")                f.write(f"資料タイトル: {rec.final_title}\n")
                 f.write(f"元ファイル名: {rec.original_filename}\n")
                 f.write(f"整理後ファイル名: {rec.renamed_filename}\n")
                 f.write(f"結合PDFページ: {start}-{end}\n")
