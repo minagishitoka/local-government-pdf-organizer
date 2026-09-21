@@ -169,6 +169,7 @@ import sys
 import threading
 import time
 import unicodedata
+import base64
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
@@ -497,8 +498,7 @@ title のルール:
   2～3ページ目も確認する。そこに議会名・会議名・回次・開催日・「議事日程」・
   「会議録」などが確認できるなら、それらを組み合わせて資料全体を識別できる正式タイトルを選ぶ。
   冒頭3ページを確認しても正式タイトルが判断できない場合は "NO_TITLE_FOUND" とする。
-- ファイル名をそのまま title にコピーしない。ファイル名しか手掛かりがない場合は
-  "NO_TITLE_FOUND" とする。
+- ファイル名をそのまま title にコピーしない。ファイル名しか手掛かりがない場合は  "NO_TITLE_FOUND" とする。
 - 明確なタイトルがない場合は "NO_TITLE_FOUND" とする。
 
 teasing のルール:
@@ -997,8 +997,7 @@ def _batch_prepare_input(records, client, config):
 
             req = _batch_make_request(key, pdf_bytes, config)
             out.write(
-                json.dumps(req, ensure_ascii=False, separators=(",", ":"))
-                + "\n"
+                json.dumps(req, ensure_ascii=False, separators=(",", ":"))                + "\n"
             )
             requests += 1
 
@@ -1497,7 +1496,6 @@ def group_records_by_page_limit(
             groups.append([rec])
             oversized_alone.append(rec)
             rec.validation_status = "needs_review"
-
             mb_size = rec_bytes / (1024 * 1024)
             reasons = []
             if rec.num_pages > page_limit:
@@ -1998,7 +1996,6 @@ def extract_merged_pdf_to_txt(output_path: str, group_records: list, txt_dir: st
                     if not text:
                         empty_pages.append(merged_page)
                         text = "[TEXT EXTRACTION EMPTY: このPDFページから文字を抽出できませんでした。画像PDF等の可能性があります。]"
-
                     if config.include_page_markers:
                         f.write(f"[PDF PAGE {merged_page}] [ORIGINAL PDF PAGE {original_page}]\n")
                     f.write(text + "\n\n")
@@ -2177,7 +2174,6 @@ def generate_txt_and_word_for_volumes(volume_results: list, config: Config):
 def write_reports(records: list, report_dir: str):
     os.makedirs(report_dir, exist_ok=True)
     import csv
-import base64
 
     all_path = os.path.join(report_dir, "対応表_全体.csv")
     inventory_path = os.path.join(report_dir, "資料一覧_全体.csv")
