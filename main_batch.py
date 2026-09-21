@@ -2231,30 +2231,28 @@ def main():
         or "ここに取得した" in api_key
         or api_key == "YOUR_API_KEY"
     ):
-        print("❌ おい、APIキー入ってないんだけど……。これがないと俺も何もできないから、Configの gemini_api_key にキー貼ってからもう一度動かしてく。")
+        print("❌ APIキーが入っていません。Configの gemini_api_key にキーを設定してください。")
         sys.exit(1)
+
     client = genai.Client(api_key=api_key)
-    print(f"🛡️ 無料耐久設定: AI最大{config.free_max_ai_calls_per_run}回/実行・{config.free_daily_ai_call_limit}回/日・API間隔{config.free_min_seconds_between_api_calls}秒")
+    _batch_ensure_dirs()
 
     pdf_paths = discover_pdfs(config.input_dir, config)
     if not pdf_paths:
-        print("❌ ここ、PDFが1個もないぞ。準備できてると思って待ってたのに……。整理したいPDFを同じフォルダに入れてからもう一回呼んで。")
+        print("❌ 整理対象のPDFが見つかりません。")
         sys.exit(1)
 
-    print(f"📂 PDF {len(pdf_paths)}件発見。よし、このくらいならサクサク片付けてやるから見てろよ。\n")
+    print(f"📂 PDF {len(pdf_paths)}件発見。Batch API版で処理します。")
+    print("   Pythonで確定できる資料はGeminiに送らず、曖昧な資料だけBatchへ投入します。")
 
-    # --- 再開用の状態を読み込む ---
     state = load_state(config.state_path)
-
     records = []
     to_process = []
+
     for path in pdf_paths:
         key = record_key(path)
         if key in state and state[key].get("municipality") and state[key].get("document_date"):
-            # 新しい自治体名・開催日メタデータまで保存済みの記録だけ再利用する。
             saved = dict(state[key])
-            # v11/v12以前のstate.jsonには後段処理等の追加項目がないため、
-            # 欠落項目はdataclassのデフォルト値で補って後方互換にする。
             for field_name, default_value in {
                 "ai_municipality_raw": "",
                 "municipality": "",
@@ -2266,143 +2264,163 @@ def main():
                 "word_error": "",
             }.items():
                 saved.setdefault(field_name, default_value)
-            rec = PdfRecord(**saved)
-            records.append(rec)
-            with print_lock:
-                print(f"  ⏭️ [スキップ] {rec.original_filename} （自治体名・開催日まで処理済みなので再利用）")
+            records.append(PdfRecord(**saved))
+            print(f"  ⏭️ [state再利用] {os.path.basename(path)}")
         else:
-            # 旧state.jsonに自治体名・開催日がない場合は、今回の仕様変更に合わせて再処理する。
-            to_process.append((path, key))
+            rec = inspect_pdf(path, config)
+            records.append(rec)
+            if rec.inspect_status == "ok":
+                to_process.append(rec)
 
-    # --- 未処理分だけAI呼び出しを含めて処理 ---
-    if to_process:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_ai_workers) as executor:
-            futures = {
-                executor.submit(process_single_pdf, path, client, config): key
-                for path, key in to_process
-            }
-            for future in concurrent.futures.as_completed(futures):
-                key = futures[future]
-                rec = future.result()
-                records.append(rec)
-                state[key] = asdict(rec)
-                save_state(config.state_path, state)  # 1件ごとに保存 = 途中で落ちても安心
+    # Python一次判定。ここで確定できる資料はBatchへ送らない。
+    batch_records = []
+    for rec in to_process:
+        municipality, document_date, offline_title, _ = _offline_extract_metadata(
+            rec.original_path, config
+        )
+        if not _free_should_call_ai(municipality, document_date, offline_title):
+            rec.ai_municipality_raw = municipality
+            rec.municipality = municipality
+            rec.ai_date_raw = document_date
+            rec.document_date = document_date
+            rec.ai_title_raw = offline_title
+            rec.final_title = offline_title
+            rec.ai_status = "skipped_python_clear"
+            rec.validation_status = "ok"
+            rec.validation_reason = (
+                "Python一次判定で自治体名・開催日・タイトルが明確だったためGeminiを未使用"
+            )
+            print(f"  🐍 [AI節約] {rec.original_filename} → {rec.municipality}_{rec.document_date}_{rec.final_title}")
+        else:
+            batch_records.append(rec)
 
-    # 元の発見順（自然順）に並べ直す
+    # 前回のBatchが実行中なら、そのジョブを再利用。
+    job = None
+    batch_state = _batch_load_state()
+    active_name = batch_state.get("batch_name")
+
+    if active_name:
+        try:
+            existing_job = client.batches.get(name=active_name)
+            existing_state = getattr(existing_job, "state", None)
+            if existing_state not in BATCH_TERMINAL_STATES:
+                job = existing_job
+                print(f"  ♻️ 実行中のBatchを再利用: {active_name}")
+                # state上の入力対象と今回のrecordsが一致することを確認
+                old_keys = set(batch_state.get("record_keys", []))
+                new_keys = {record_key(r.original_path) for r in batch_records}
+                if old_keys != new_keys:
+                    raise RuntimeError(
+                        "前回のBatchと今回のPDF集合が一致しません。"
+                        "前回Batchを勝手に別資料へ適用しないため処理を停止します。"
+                    )
+        except RuntimeError:
+            raise
+        except Exception:
+            job = None
+
+    if job is None and batch_records:
+        # 新規Batchを作成。
+        job, batch_state = _batch_create_or_resume(client, batch_records, config)
+        batch_state["record_keys"] = [record_key(r.original_path) for r in batch_records]
+        _batch_save_state(batch_state)
+
+    if job is not None and batch_records:
+        # SUCCEEDEDなら結果を取得。実行中なら完了まで待つ。
+        current = getattr(job, "state", None)
+        if current == "JOB_STATE_SUCCEEDED":
+            result_path = _batch_download_results(client, job, batch_state)
+            applied, failed = _batch_apply_results(batch_records, result_path)
+            batch_state.update({
+                "status": current,
+                "result_file": result_path,
+                "applied": applied,
+                "failed": failed,
+            })
+            _batch_save_state(batch_state)
+        elif current in BATCH_TERMINAL_STATES:
+            raise RuntimeError(f"前回Batchが終了状態ですが成功していません: {current}")
+        else:
+            _batch_wait_and_apply(client, job, batch_records, batch_state, config)
+
+    # AI処理に失敗した資料も含め、stateを1回保存。
     records.sort(key=lambda r: natural_keys(r.original_filename))
+    state = {record_key(r.original_path): asdict(r) for r in records}
+    save_state(config.state_path, state)
 
-    # --- コピー＆リネーム ---
+    # 以降は元のmain_free.pyと同じ後段処理。
     copy_and_rename(records, config.renamed_dir)
 
-    # --- ページ数および容量単位でグループ分け ---
     groups = group_records_by_page_limit(
         records,
         config.page_limit_per_volume,
         config.max_mb_per_volume,
     )
 
-    # --- グループごとに結合（1件でも失敗したらその巻は完成させない） ---
     print()
     succeeded_volumes = 0
     failed_volumes = 0
     volume_results = []
+
     for i, group in enumerate(groups, 1):
         output_path, success = merge_group(group, i, config.merged_dir, config)
         total_pages = sum(r.num_pages for r in group)
         if success:
             succeeded_volumes += 1
             volume_results.append((i, group, output_path))
-            print(f"📚 第{i}巻できたぞ！ {len(group)}件・計{total_pages}ページ分。目次もしおりもピッタリ合ってる。完璧だな。")
+            print(f"📚 第{i}巻できたぞ！ {len(group)}件・計{total_pages}ページ。")
         else:
             failed_volumes += 1
-            print(f"🛑 [第{i}巻・結合中断] {len(group)}件の結合中にエラーが出た。中途半端なファイルを出力すると事故るから処理を止めている。要確認リストを見て対応してく。（エラー: 巻の結合に失敗）")
+            print(f"🛑 第{i}巻の結合に失敗。中途半端なPDFは完成扱いにしません。")
 
-    # --- ④ PDF→TXT、⑤ TXT→Word ---
     if volume_results and (config.create_txt or config.create_word):
         generate_txt_and_word_for_volumes(volume_results, config)
 
-    # --- 古い巻ファイルの整理 ---
-    # 今回の処理が全巻成功した場合のみ、今回の巻数を超える古い完成品を削除する。
-    # 途中で失敗した実行では、前回の完成品を残しておき、誤って有効な資料を消さない。
     if failed_volumes == 0:
-        import re
         volume_pattern = re.compile(
             rf"^{re.escape(config.volume_prefix)}_第(\d+)巻\.pdf$"
         )
         current_volume_count = len(groups)
-        stale_files = []
         try:
             for existing_path in Path(config.merged_dir).glob("*.pdf"):
                 match = volume_pattern.match(existing_path.name)
                 if match and int(match.group(1)) > current_volume_count:
-                    stale_files.append(existing_path)
-
-            for stale_path in stale_files:
-                stale_path.unlink()
-                print(f"  🧹 前回の古い巻（{stale_path.name}）が残ってたから片付けておいたぞ。")
+                    existing_path.unlink()
         except OSError as e:
-            print(f"  ⚠️ 古い結合PDFの整理に失敗しました: {e}")
-    else:
-        print("  ⚠️ 待て。まだ未完成の巻がある。この状態で古いPDFまで消すとデータ事故に繋がるから、今回は消さずに残すぞ。全巻完成してから片付ける。")
+            print(f"  ⚠️ 古い結合PDFの整理に失敗: {e}")
 
-    # --- レポート出力 ---
-    # 5種類のCSVを「該当0件でも必ず」生成する。
-    (all_path, inventory_path, review_path, error_path, summary_path,
-     review_count, error_count_from_report) = write_reports(records, config.report_dir)
+    (
+        all_path, inventory_path, review_path, error_path, summary_path,
+        review_count, error_count_from_report
+    ) = write_reports(records, config.report_dir)
 
-    # レポート生成そのものを検証。成功したのに帳票が無い状態を見逃さない。
     report_paths = [all_path, inventory_path, review_path, error_path, summary_path]
     missing_reports = [p for p in report_paths if not os.path.isfile(p)]
     if missing_reports:
-        print("\n🛑 [レポート生成失敗] 必要なCSVが作られていないぞ。")
-        for p in missing_reports:
-            print(f"   未生成: {p}")
-        print("   この状態では処理完了扱いにしない。")
-        raise RuntimeError("必要なレポートCSVの生成に失敗しました")
+        raise RuntimeError(f"必要なレポートCSVが生成されていません: {missing_reports}")
 
-    print("\n📊 レポート生成完了。")
-    print(f"   📋 資料一覧       : {inventory_path}")
-    print(f"   🔗 対応表         : {all_path}")
-    print(f"   ⚠️ 要確認リスト   : {review_path}")
-    print(f"   🛑 エラーリスト   : {error_path}")
-    print(f"   📈 処理集計       : {summary_path}")
-
-    # 結合結果・ページ範囲まで確定した最新状態を保存する。
-    # 次回実行時に、途中までの処理だけでなく最終状態も参照できるようにする。
     try:
         final_state = {record_key(r.original_path): asdict(r) for r in records}
         save_state(config.state_path, final_state)
     except Exception as e:
-        print(f"  ⚠️ state保存に失敗した。次回の再開に影響するから、ここは要確認な。（エラー: {e}）")
+        print(f"  ⚠️ state保存に失敗: {e}")
 
-    # --- 最終サマリー ---
     ok_count = sum(1 for r in records if r.overall_status() == "正常")
     error_count = sum(1 for r in records if r.overall_status() == "エラー")
 
-    print("\n" + "=" * 50)
-    print(f"よし。全{len(records)}件、終わり。")
-    print()
+    print("\n" + "=" * 60)
+    print(f"🎉 全{len(records)}件、Batch API版の処理完了。")
     print(f"  正常   : {ok_count}件")
     print(f"  要確認 : {review_count}件")
     print(f"  エラー : {error_count}件")
-    print()
-    print(f"完成した巻 : {succeeded_volumes}巻")
-    print(f"未完成の巻 : {failed_volumes}巻")
-    print()
-    print(f"資料一覧全体  : {inventory_path}")
-    print(f"対応表全体    : {all_path}")
-    print(f"要確認リスト  : {review_path}")
-    print(f"エラーリスト  : {error_path}")
-    print(f"処理集計      : {summary_path}")
-    print()
-    print("Python一次判定→必要な資料だけGemini→目次・ページ番号・しおり・検品・TXT化・Word化まで完了。")
-    print("……ほら、ちゃんと仕事できるだろ？")
-    print()
-    print("まあ……アンタが使うなら、")
-    print("これくらいきっちりやっとかないとな。")
-    print()
-    print("……別に褒められたいわけじゃないけど。")
-    print("=" * 50)
+    print(f"  完成巻 : {succeeded_volumes}巻")
+    print(f"  未完成 : {failed_volumes}巻")
+    print(f"  📋 資料一覧: {inventory_path}")
+    print(f"  🔗 対応表  : {all_path}")
+    print(f"  ⚠️ 要確認  : {review_path}")
+    print(f"  🛑 エラー  : {error_path}")
+    print(f"  📈 集計    : {summary_path}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
